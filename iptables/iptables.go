@@ -75,6 +75,8 @@ type IPTables struct {
 	v3                int
 	mode              string // the underlying iptables operating mode, e.g. nf_tables
 	timeout           int    // time to wait for the iptables lock, default waits forever
+	withSudo          bool   // run iptables with sudo
+	pathSudo          string
 }
 
 // Stat represents a structured statistic entry.
@@ -105,6 +107,12 @@ func Timeout(timeout int) option {
 	}
 }
 
+func Sudo() option {
+	return func(ipt *IPTables) {
+		ipt.withSudo = true
+	}
+}
+
 // New creates a new IPTables configured with the options passed as parameter.
 // For backwards compatibility, by default always uses IPv4 and timeout 0.
 // i.e. you can create an IPv6 IPTables using a timeout of 5 seconds passing
@@ -114,8 +122,9 @@ func Timeout(timeout int) option {
 func New(opts ...option) (*IPTables, error) {
 
 	ipt := &IPTables{
-		proto:   ProtocolIPv4,
-		timeout: 0,
+		proto:    ProtocolIPv4,
+		timeout:  0,
+		withSudo: false,
 	}
 
 	for _, opt := range opts {
@@ -127,6 +136,27 @@ func New(opts ...option) (*IPTables, error) {
 		return nil, err
 	}
 	ipt.path = path
+
+	pathSudo, err := exec.LookPath("sudo")
+	if err != nil {
+		return nil, err
+	}
+	ipt.pathSudo = pathSudo
+
+	if ipt.withSudo {
+		var stdout, stderr bytes.Buffer
+		cmd := exec.Cmd{
+			Path:   pathSudo,
+			Args:   []string{pathSudo, "-A", path, "--version"},
+			Stdout: &stdout,
+			Stderr: &stderr,
+			Env:    []string{"SUDO_ASKPASS=/bin/false"},
+		}
+
+		if err := cmd.Run(); err != nil {
+			return nil, fmt.Errorf("sudo %s command is not allowed without password", path)
+		}
+	}
 
 	vstring, err := getIptablesVersionString(path)
 	if err != nil {
@@ -520,6 +550,9 @@ func (ipt *IPTables) run(args ...string) error {
 // writing any stdout output to the given writer
 func (ipt *IPTables) runWithOutput(args []string, stdout io.Writer) error {
 	args = append([]string{ipt.path}, args...)
+	if ipt.withSudo {
+		args = append([]string{ipt.pathSudo}, args...)
+	}
 	if ipt.hasWait {
 		args = append(args, "--wait")
 		if ipt.timeout != 0 && ipt.waitSupportSecond {
@@ -546,6 +579,10 @@ func (ipt *IPTables) runWithOutput(args []string, stdout io.Writer) error {
 		Args:   args,
 		Stdout: stdout,
 		Stderr: &stderr,
+	}
+
+	if ipt.withSudo {
+		cmd.Path = ipt.pathSudo
 	}
 
 	if err := cmd.Run(); err != nil {
